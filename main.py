@@ -19,8 +19,8 @@ from tqdm import tqdm
 
 DATA_DIR = "./data"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
-CHUNK_TOKEN_ESTIMATE = 200  # roughly words per chunk
-CHUNK_OVERLAP = 50  # words overlap
+CHUNK_TOKEN_ESTIMATE = 200
+CHUNK_OVERLAP = 50
 TOP_K = 5
 
 # ---------------------------
@@ -36,36 +36,29 @@ def extract_text_from_pdf(path: str) -> List[Tuple[int, str]]:
         with pdfplumber.open(path) as pdf:
             for i, page in enumerate(pdf.pages):
                 try:
-                    # Try standard text extraction first
                     text = page.extract_text() or ""
                     pages.append((i + 1, text))
                 except Exception as e:
                     print(f"Warning: Error extracting text from page {i+1} in {path}: {e}")
                     try:
-                        # Fallback: try extracting text with different method
                         text = page.extract_text_simple() or ""
                         pages.append((i + 1, text))
                         print(f"Used fallback extraction for page {i+1}")
                     except Exception as e2:
                         print(f"Fallback extraction also failed for page {i+1}: {e2}")
-                        # Last resort: try to get any text using different approach
                         try:
-                            # Try extracting with layout preservation disabled
                             text = page.extract_text(layout=False) or ""
                             pages.append((i + 1, text))
                             print(f"Used layout=False extraction for page {i+1}")
                         except:
-                            # If all else fails, add empty page
                             pages.append((i + 1, ""))
                             print(f"Could not extract any text from page {i+1}")
     except Exception as e:
         print(f"Error opening PDF {path}: {e}")
-        # Try alternative PDF libraries if pdfplumber fails completely
         success = False
         
-        # Try PyMuPDF first (often more robust)
         try:
-            import fitz  # PyMuPDF
+            import fitz
             doc = fitz.open(path)
             for i in range(len(doc)):
                 try:
@@ -82,7 +75,6 @@ def extract_text_from_pdf(path: str) -> List[Tuple[int, str]]:
         except Exception as e2:
             print(f"PyMuPDF fallback failed for {path}: {e2}")
         
-        # Try PyPDF2 if PyMuPDF failed
         if not success:
             try:
                 import PyPDF2
@@ -126,7 +118,7 @@ def chunk_text(text: str, page_num:int, chunk_size_words=CHUNK_TOKEN_ESTIMATE, o
 class RAGIndex:
     def __init__(self, embed_model_name=EMBED_MODEL_NAME):
         self.model = SentenceTransformer(embed_model_name)
-        self.texts = []  # list of dicts {company, year, page, text, filename}
+        self.texts = []
         self.embeddings = None
         self.index = None
 
@@ -151,16 +143,13 @@ class RAGIndex:
         self._build_index()
 
     def _parse_filename(self, fname: str) -> Dict[str,str]:
-        # Expect something like MSFT_2023.pdf or GOOGL-2024.pdf
         base = os.path.splitext(fname)[0]
         m = re.match(r"(MSFT|GOOGL|NVDA)[-_]?(\d{4})", base, re.IGNORECASE)
         if m:
             comp, year = m.group(1).upper(), m.group(2)
             return {"company": comp, "year": year}
-        # fallback: attempt to find year
         y = re.search(r"(20\d{2})", base)
         year = y.group(1) if y else "unknown"
-        # attempt to map company by keywords
         comp = None
         if "goog" in base.lower() or "alphabet" in base.lower():
             comp = "GOOGL"
@@ -174,15 +163,12 @@ class RAGIndex:
 
     def _build_index(self):
         texts = [t["text"] for t in self.texts]
-        # compute embeddings in batches
         print("[index] encoding embeddings...")
         embeddings = self.model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
         self.embeddings = embeddings.astype("float32")
         dim = self.embeddings.shape[1]
         print(f"[index] embeddings shape: {self.embeddings.shape}")
-        # faiss index
         self.index = faiss.IndexFlatIP(dim)  # use inner-product on normalized vectors
-        # normalize vectors
         faiss.normalize_L2(self.embeddings)
         self.index.add(self.embeddings)
         print(f"[index] faiss index built with {self.index.ntotal} vectors")
@@ -202,9 +188,7 @@ class RAGIndex:
             results.append(rec)
         return results
 
-# ---------------------------
-# Simple extractor helpers
-# ---------------------------
+
 NUM_RE = re.compile(r"(?P<num>\$?[\d{1,3},]+\d(?:\.\d+)?)(?:\s*(million|billion|bn|m|k)?)", re.IGNORECASE)
 PERCENT_RE = re.compile(r"(?P<pct>\d{1,3}\.\d+%|\d{1,3}%|\d{1,3}\.\d+ percent|\d{1,3} percent)", re.IGNORECASE)
 
@@ -222,27 +206,21 @@ def find_first_number(chunks: List[Dict[str,Any]]) -> Tuple[str, Dict[str,Any]]:
             return m.group(0) + ((" " + (m.group(2) or "")) if m.group(2) else ""), c
     return None, None
 
-# A light-weight metric extractor using keyword heuristics
 def extract_metric(metric: str, company: str, year: str, index: RAGIndex) -> Dict[str,Any]:
     q = f"{company} {metric} {year}"
     chunks = index.retrieve(q, top_k=8)
-    # attempt to parse percentages first for margin-like metrics
     if any(w in metric.lower() for w in ["margin", "percentage", "%", "percent", "percentage of revenue", "percentage of"]):
         val, chunk = find_first_percentage(chunks)
         if val:
             return {"value": val, "source": chunk}
-    # otherwise try numeric amounts
     val, chunk = find_first_number(chunks)
     if val:
         return {"value": val, "source": chunk}
     # fallback: return top chunk as evidence
     return {"value": None, "source": chunks[0] if chunks else None, "all_chunks": chunks}
 
-# ---------------------------
-# Simple agent: detect query type and decompose
-# ---------------------------
+
 def needs_decomposition(query: str) -> bool:
-    # simple heuristic: comparative words or multiple companies
     comp_words = ["compare", "compare", "which", "highest", "lowest", "vs", "versus", "across", "between"]
     years = re.findall(r"20\d{2}", query)
     return any(w in query.lower() for w in comp_words) or len(years) >= 2
@@ -251,14 +229,12 @@ def extract_companies_from_query(query: str) -> List[str]:
     comps = []
     for c in ["MSFT","GOOGL","NVDA","MICROSOFT","GOOGLE","ALPHABET","NVIDIA"]:
         if c.lower() in query.lower():
-            # map to canonical
             if "msft" in c.lower() or "micro" in c.lower():
                 comps.append("MSFT")
             elif "goog" in c.lower() or "alphabet" in c.lower():
                 comps.append("GOOGL")
             else:
                 comps.append("NVDA")
-    # if none found, assume all three
     return sorted(list(set(comps))) if comps else ["MSFT","GOOGL","NVDA"]
 
 def extract_years_from_query(query: str) -> List[str]:
@@ -271,7 +247,6 @@ def decompose_query(query: str) -> List[str]:
     """
     metric = None
     q_lower = query.lower()
-    # detect metric keywords
     if "total revenue" in q_lower or "total revenues" in q_lower or "revenue" in q_lower:
         metric = "total revenue"
     if "operating margin" in q_lower or "operating margin" in q_lower or "operating margin" in q_lower:
@@ -289,30 +264,23 @@ def decompose_query(query: str) -> List[str]:
     years = extract_years_from_query(query)
     sub_queries = []
 
-    # if it's a growth (from X to Y)
     ys = years
     if "from" in q_lower and "to" in q_lower and len(ys) >= 2:
-        # request growth per company
         for c in companies:
             sub_queries.append(f"{c} {metric} {ys[0]}")
             sub_queries.append(f"{c} {metric} {ys[1]}")
         return sub_queries
 
-    # if comparison across companies for a single year
     if len(ys) == 1:
         y = ys[0]
         for c in companies:
             sub_queries.append(f"{c} {metric} {y}")
         return sub_queries
 
-    # if no years mentioned, produce queries for 2023 as default + 2024 where relevant
     for c in companies:
         sub_queries.append(f"{c} {metric} 2023")
     return sub_queries
 
-# ---------------------------
-# Orchestrator & synthesizer
-# ---------------------------
 def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
     result = {
         "query": query,
@@ -324,14 +292,12 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
     if needs_decomposition(query):
         sub_qs = decompose_query(query)
     else:
-        # single retrieval
         sub_qs = [query]
 
     result["sub_queries"] = sub_qs
 
     collected = []
     for sq in sub_qs:
-        # parse company/year out of subquery pattern
         m = re.match(r"(MSFT|GOOGL|NVDA)\s+(.+?)\s+(20\d{2})", sq, re.IGNORECASE)
         if m:
             company = m.group(1).upper()
@@ -348,7 +314,6 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
                 "raw_chunks": metric_res.get("all_chunks")
             })
         else:
-            # fallback: basic retrieval
             chunks = index.retrieve(sq, top_k=TOP_K)
             collected.append({
                 "sub_query": sq,
@@ -360,7 +325,6 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
                 "raw_chunks": chunks
             })
 
-    # Fill sources and synthesize a simple answer
     sources = []
     for c in collected:
         src = c["source"]
@@ -374,7 +338,6 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
             })
     result["sources"] = sources
 
-    # Build answer text depending on query type (heuristic)
     if len(collected) == 1:
         c = collected[0]
         if c["value"]:
@@ -392,17 +355,14 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
                 result["answer"] = "No relevant information found in the filings."
                 result["reasoning"] = "No chunks retrieved."
     else:
-        # comparative: try to compare numeric values
         values = []
         for c in collected:
             v = c.get("value")
-            # attempt to normalize percent strings to numeric (heuristic)
             if isinstance(v, str):
                 p = re.search(r"(\d{1,3}\.\d+|\d{1,3})\s*%", v)
                 if p:
                     values.append((c.get("company"), float(p.group(1)), c.get("year")))
                     continue
-                # dollars: remove $ and commas
                 num = re.search(r"\$?([\d,]+\d(?:\.\d+)?)", v)
                 if num:
                     try:
@@ -413,10 +373,8 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
                         pass
             values.append((c.get("company"), None, c.get("year")))
 
-        # if at least one numeric exists, pick highest
         numeric_values = [t for t in values if t[1] is not None]
         if numeric_values:
-            # determine type: percent (0-100) or absolute
             is_percent = any(0 <= tv[1] <= 100 for tv in numeric_values)
             if is_percent:
                 best = max(numeric_values, key=lambda x: x[1])
@@ -427,7 +385,6 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
                 result["answer"] = f"{best[0]} had the highest value: {best[1]} ({best[2]})."
                 result["reasoning"] = f"Compared extracted numeric amounts from filings for each company."
         else:
-            # no numeric: synthesize from snippets
             snippets = []
             for c in collected:
                 src = c["source"]
@@ -440,9 +397,6 @@ def answer_query(query: str, index: RAGIndex) -> Dict[str,Any]:
     result["detailed_results"] = collected
     return result
 
-# ---------------------------
-# CLI
-# ---------------------------
 def interactive_loop(index: RAGIndex):
     print("Simple RAG Agent CLI. Type 'quit' to exit.")
     while True:
@@ -452,13 +406,9 @@ def interactive_loop(index: RAGIndex):
         resp = answer_query(q, index)
         print(json.dumps(resp, indent=2))
 
-# ---------------------------
-# Run
-# ---------------------------
 def main():
     rug = RAGIndex()
     rug.ingest_folder(DATA_DIR)
-    # quick demo queries (uncomment to run programmatically)
     sample_queries = [
         "What was NVIDIA's total revenue in fiscal year 2024?",
         "Which company had the highest operating margin in 2023?",
